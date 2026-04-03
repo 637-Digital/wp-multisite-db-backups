@@ -111,6 +111,18 @@ function msb_run_backups() {
                 'status'    => 'failed',
                 'message'   => $export->get_error_message(),
             ] );
+            // Send notification email on export failure
+            if ( $settings['email'] ) {
+                $subject = sprintf( '[%s] Backup Export Failed: Site %s (ID: %d)', get_network()->site_name, $slug, $blog_id );
+                $message = sprintf(
+                    "Database export failed for site: %s (Blog ID: %d)\n\nError: %s\n\nLogged at: %s",
+                    $slug,
+                    $blog_id,
+                    $export->get_error_message(),
+                    current_time( 'mysql' )
+                );
+                wp_mail( $settings['email'], $subject, $message );
+            }
             continue;
         }
 
@@ -132,6 +144,22 @@ function msb_run_backups() {
                 'duration_s' => $duration,
                 'message'    => $upload->get_error_message(),
             ] );
+            // Send notification email on failure
+            if ( $settings['email'] && is_wp_error( $upload ) ) {
+                $subject = sprintf( '[%s] Backup Failed: Site %s (ID: %d)', get_network()->site_name, $slug, $blog_id );
+                $message = sprintf(
+                    "Backup failed for site: %s (Blog ID: %d)\n\nError: %s\n\nFile: %s\nSize: %s bytes\nDuration: %ss\n\nLogged at: %s",
+                    $slug,
+                    $blog_id,
+                    $upload->get_error_message(),
+                    $file_name,
+                    size_format( $file_size ),
+                    $duration,
+                    current_time( 'mysql' )
+                );
+                wp_mail( $settings['email'], $subject, $message );
+            }
+
             // Retain local file for retry — do not delete.
             continue;
         }
@@ -160,6 +188,7 @@ function msb_get_settings(): array {
         'key_id'   => get_site_option( 'msb_b2_key_id',   '' ),
         'app_key'  => get_site_option( 'msb_b2_app_key',  '' ),
         'prefix'   => get_site_option( 'msb_b2_prefix',   'per-site-backups/' ),
+        'email'    => get_site_option( 'msb_notification_email', '' ),
     ];
 }
 
@@ -170,9 +199,13 @@ function msb_save_settings() {
         wp_die( 'Unauthorized.' );
     }
 
-    $fields = [ 'msb_b2_endpoint', 'msb_b2_bucket', 'msb_b2_key_id', 'msb_b2_app_key', 'msb_b2_prefix' ];
+    $fields = [ 'msb_b2_endpoint', 'msb_b2_bucket', 'msb_b2_key_id', 'msb_b2_app_key', 'msb_b2_prefix', 'msb_notification_email' ];
     foreach ( $fields as $field ) {
-        update_site_option( $field, sanitize_text_field( wp_unslash( $_POST[ $field ] ?? '' ) ) );
+        if ( $field === 'msb_notification_email' ) {
+            update_site_option( $field, sanitize_email( wp_unslash( $_POST[ $field ] ?? '' ) ) );
+        } else {
+            update_site_option( $field, sanitize_text_field( wp_unslash( $_POST[ $field ] ?? '' ) ) );
+        }
     }
 
     wp_redirect( add_query_arg( [ 'page' => 'msb-site-backups', 'updated' => '1' ], network_admin_url( 'admin.php' ) ) );
@@ -242,15 +275,20 @@ function msb_render_settings_page() {
             <table class="form-table">
                 <?php
                 $fields = [
-                    'msb_b2_endpoint' => [ 'label' => 'B2 Endpoint',      'placeholder' => 'https://s3.us-west-004.backblazeb2.com' ],
-                    'msb_b2_bucket'   => [ 'label' => 'Bucket Name',      'placeholder' => 'my-bucket' ],
-                    'msb_b2_key_id'   => [ 'label' => 'Key ID',           'placeholder' => '' ],
-                    'msb_b2_app_key'  => [ 'label' => 'Application Key',  'placeholder' => '', 'type' => 'password' ],
-                    'msb_b2_prefix'   => [ 'label' => 'Folder Prefix',    'placeholder' => 'per-site-backups/' ],
+                    'msb_b2_endpoint'       => [ 'label' => 'B2 Endpoint',       'placeholder' => 'https://s3.us-west-004.backblazeb2.com' ],
+                    'msb_b2_bucket'         => [ 'label' => 'Bucket Name',       'placeholder' => 'my-bucket' ],
+                    'msb_b2_key_id'         => [ 'label' => 'Key ID',            'placeholder' => '' ],
+                    'msb_b2_app_key'        => [ 'label' => 'Application Key',   'placeholder' => '', 'type' => 'password' ],
+                    'msb_b2_prefix'         => [ 'label' => 'Folder Prefix',     'placeholder' => 'per-site-backups/' ],
+                    'msb_notification_email'=> [ 'label' => 'Notification Email', 'placeholder' => 'admin@example.com' ],
                 ];
                 foreach ( $fields as $key => $field ) :
                     $type        = $field['type'] ?? 'text';
-                    $setting_key = str_replace( 'msb_b2_', '', $key );
+                    if ( $key === 'msb_notification_email' ) {
+                        $setting_key = 'email';
+                    } else {
+                        $setting_key = str_replace( 'msb_b2_', '', $key );
+                    }
                 ?>
                 <tr>
                     <th><label for="<?php echo esc_attr( $key ); ?>"><?php echo esc_html( $field['label'] ); ?></label></th>
