@@ -1,18 +1,18 @@
 <?php
 /**
- * Plugin Name: Multi-Site Content Backup
- * Plugin URI:  https://github.com/637-Digital/multi-site-cron-backup
- * Description: Per-site database export for Hope Ignites multisite — uploads to Backblaze B2.
- * Version:     0.1.0
- * Network:     true
- * Author:      637 Digital
+ * Core functionality for WP Multisite DB Backups
+ *
+ * @package WP_Multisite_DB_Backups
+ * @version 1.0.0
  */
 
 defined( 'ABSPATH' ) || exit;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
-define( 'MSB_VERSION',   '0.1.0' );
-define( 'MSB_DIR',       plugin_dir_path( __FILE__ ) );
+if ( ! defined( 'MSB_VERSION' ) ) {
+    define( 'MSB_VERSION', '1.0.0' );
+}
+define( 'MSB_DIR', plugin_dir_path( __FILE__ ) );
 define( 'MSB_CRON_HOOK', 'msb_run_backups' );
 define( 'MSB_LOG_TABLE', 'wp_msb_backup_log' );
 
