@@ -227,7 +227,7 @@ function msb_render_settings_page() {
     $settings = msb_get_settings();
     ?>
     <div class="wrap">
-        <h1>Multi-Site Content Backup</h1>
+        <h1>Multisite Content Backup</h1>
 
         <?php if ( ! empty( $_GET['updated'] ) ) : ?>
             <div class="notice notice-success"><p>Settings saved.</p></div>
