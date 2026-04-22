@@ -24,6 +24,7 @@ require_once MSB_DIR . 'class-b2-uploader.php';
 add_action( 'init', 'msb_maybe_create_log_table' );
 add_action( MSB_CRON_HOOK, 'msb_run_backups' );
 add_action( 'init', 'msb_schedule_cron' );
+add_filter( 'cron_schedules', 'msb_add_cron_interval' );
 
 // Network settings page.
 add_action( 'network_admin_menu', 'msb_register_settings_page' );
@@ -33,9 +34,22 @@ add_action( 'network_admin_edit_msb_save_settings', 'msb_save_settings' );
 add_action( 'admin_post_msb_run_now', 'msb_handle_run_now' );
 
 // ─── Cron Registration ────────────────────────────────────────────────────────
+function msb_add_cron_interval( array $schedules ): array {
+    $hours = max( 1, (int) get_site_option( 'msb_backup_frequency_hours', 24 ) );
+    $schedules['msb_custom_interval'] = [
+        'interval' => $hours * HOUR_IN_SECONDS,
+        'display'  => sprintf( 'Every %d hour(s)', $hours ),
+    ];
+    return $schedules;
+}
+
 function msb_schedule_cron() {
+    // Replace any existing event that isn't using our custom interval (e.g. old 'daily' schedule).
+    if ( wp_next_scheduled( MSB_CRON_HOOK ) && wp_get_schedule( MSB_CRON_HOOK ) !== 'msb_custom_interval' ) {
+        wp_clear_scheduled_hook( MSB_CRON_HOOK );
+    }
     if ( ! wp_next_scheduled( MSB_CRON_HOOK ) ) {
-        wp_schedule_event( strtotime( 'tomorrow 02:00:00' ), 'daily', MSB_CRON_HOOK );
+        wp_schedule_event( time() + HOUR_IN_SECONDS, 'msb_custom_interval', MSB_CRON_HOOK );
     }
 }
 
@@ -183,12 +197,13 @@ function msb_run_backups() {
 // ─── Settings ─────────────────────────────────────────────────────────────────
 function msb_get_settings(): array {
     return [
-        'endpoint' => get_site_option( 'msb_b2_endpoint', '' ),
-        'bucket'   => get_site_option( 'msb_b2_bucket',   '' ),
-        'key_id'   => get_site_option( 'msb_b2_key_id',   '' ),
-        'app_key'  => get_site_option( 'msb_b2_app_key',  '' ),
-        'prefix'   => get_site_option( 'msb_b2_prefix',   'per-site-backups/' ),
-        'email'    => get_site_option( 'msb_notification_email', '' ),
+        'endpoint'        => get_site_option( 'msb_b2_endpoint', '' ),
+        'bucket'          => get_site_option( 'msb_b2_bucket',   '' ),
+        'key_id'          => get_site_option( 'msb_b2_key_id',   '' ),
+        'app_key'         => get_site_option( 'msb_b2_app_key',  '' ),
+        'prefix'          => get_site_option( 'msb_b2_prefix',   'per-site-backups/' ),
+        'email'           => get_site_option( 'msb_notification_email', '' ),
+        'frequency_hours' => max( 1, (int) get_site_option( 'msb_backup_frequency_hours', 24 ) ),
     ];
 }
 
@@ -206,6 +221,15 @@ function msb_save_settings() {
         } else {
             update_site_option( $field, sanitize_text_field( wp_unslash( $_POST[ $field ] ?? '' ) ) );
         }
+    }
+
+    $new_frequency = max( 1, (int) ( $_POST['msb_backup_frequency_hours'] ?? 24 ) );
+    $old_frequency = max( 1, (int) get_site_option( 'msb_backup_frequency_hours', 24 ) );
+    update_site_option( 'msb_backup_frequency_hours', $new_frequency );
+
+    if ( $new_frequency !== $old_frequency || wp_get_schedule( MSB_CRON_HOOK ) !== 'msb_custom_interval' ) {
+        wp_clear_scheduled_hook( MSB_CRON_HOOK );
+        wp_schedule_event( time() + $new_frequency * HOUR_IN_SECONDS, 'msb_custom_interval', MSB_CRON_HOOK );
     }
 
     wp_redirect( add_query_arg( [ 'page' => 'msb-site-backups', 'updated' => '1' ], network_admin_url( 'admin.php' ) ) );
@@ -302,6 +326,19 @@ function msb_render_settings_page() {
                     </td>
                 </tr>
                 <?php endforeach; ?>
+                <tr>
+                    <th><label for="msb_backup_frequency_hours">Backup Frequency (hours)</label></th>
+                    <td>
+                        <input type="number"
+                               id="msb_backup_frequency_hours"
+                               name="msb_backup_frequency_hours"
+                               value="<?php echo esc_attr( $settings['frequency_hours'] ); ?>"
+                               min="1"
+                               step="1"
+                               class="small-text">
+                        <p class="description">How often to run automatic backups. E.g. enter <strong>24</strong> for daily, <strong>12</strong> for twice a day.</p>
+                    </td>
+                </tr>
             </table>
             <?php submit_button( 'Save Settings' ); ?>
         </form>
