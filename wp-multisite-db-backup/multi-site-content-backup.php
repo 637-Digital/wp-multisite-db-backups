@@ -44,8 +44,12 @@ function msb_add_cron_interval( array $schedules ): array {
 }
 
 function msb_schedule_cron() {
+    // Replace any existing event that isn't using our custom interval (e.g. old 'daily' schedule).
+    if ( wp_next_scheduled( MSB_CRON_HOOK ) && wp_get_schedule( MSB_CRON_HOOK ) !== 'msb_custom_interval' ) {
+        wp_clear_scheduled_hook( MSB_CRON_HOOK );
+    }
     if ( ! wp_next_scheduled( MSB_CRON_HOOK ) ) {
-        wp_schedule_event( time(), 'msb_custom_interval', MSB_CRON_HOOK );
+        wp_schedule_event( time() + HOUR_IN_SECONDS, 'msb_custom_interval', MSB_CRON_HOOK );
     }
 }
 
@@ -223,9 +227,9 @@ function msb_save_settings() {
     $old_frequency = max( 1, (int) get_site_option( 'msb_backup_frequency_hours', 24 ) );
     update_site_option( 'msb_backup_frequency_hours', $new_frequency );
 
-    if ( $new_frequency !== $old_frequency ) {
+    if ( $new_frequency !== $old_frequency || wp_get_schedule( MSB_CRON_HOOK ) !== 'msb_custom_interval' ) {
         wp_clear_scheduled_hook( MSB_CRON_HOOK );
-        wp_schedule_event( time(), 'msb_custom_interval', MSB_CRON_HOOK );
+        wp_schedule_event( time() + $new_frequency * HOUR_IN_SECONDS, 'msb_custom_interval', MSB_CRON_HOOK );
     }
 
     wp_redirect( add_query_arg( [ 'page' => 'msb-site-backups', 'updated' => '1' ], network_admin_url( 'admin.php' ) ) );
