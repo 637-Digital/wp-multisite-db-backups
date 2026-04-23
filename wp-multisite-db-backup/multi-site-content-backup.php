@@ -303,6 +303,15 @@ function msb_render_settings_page() {
     <div class="wrap">
         <h1>Multisite Content Backup</h1>
 
+        <p class="description" style="max-width: 800px; margin: 8px 0 16px;">
+            Automatically backs up the database of every site in this network to
+            <a href="https://www.backblaze.com/cloud-storage" target="_blank" rel="noopener">Backblaze B2</a>
+            on a configurable schedule. Each site's database is exported, compressed, and uploaded
+            as a separate <code>.sql.gz</code> file organised by site slug. Configure your B2
+            credentials below, set how often backups should run, and choose whether to receive
+            email notifications on success or failure.
+        </p>
+
         <?php if ( ! empty( $_GET['updated'] ) ) : ?>
             <div class="notice notice-success"><p>Settings saved.</p></div>
         <?php endif; ?>
