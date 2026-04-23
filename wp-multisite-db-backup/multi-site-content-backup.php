@@ -458,6 +458,10 @@ function msb_render_settings_page() {
             });
             </script>
         <?php endif; ?>
+
+        <p style="margin-top: 32px; color: #646970; font-size: 12px;">
+            Built with love, AI &amp; coffee by <a href="https://637digital.com" target="_blank" rel="noopener">637 Digital</a>.
+        </p>
     </div>
     <?php
 }
