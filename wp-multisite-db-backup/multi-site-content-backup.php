@@ -125,8 +125,7 @@ function msb_run_backups() {
                 'status'    => 'failed',
                 'message'   => $export->get_error_message(),
             ] );
-            // Send notification email on export failure
-            if ( $settings['email'] ) {
+            if ( $settings['email'] && $settings['notify_failure'] ) {
                 $subject = sprintf( '[%s] Backup Export Failed: Site %s (ID: %d)', get_network()->site_name, $slug, $blog_id );
                 $message = sprintf(
                     "Database export failed for site: %s (Blog ID: %d)\n\nError: %s\n\nLogged at: %s",
@@ -158,8 +157,7 @@ function msb_run_backups() {
                 'duration_s' => $duration,
                 'message'    => $upload->get_error_message(),
             ] );
-            // Send notification email on failure
-            if ( $settings['email'] && is_wp_error( $upload ) ) {
+            if ( $settings['email'] && $settings['notify_failure'] ) {
                 $subject = sprintf( '[%s] Backup Failed: Site %s (ID: %d)', get_network()->site_name, $slug, $blog_id );
                 $message = sprintf(
                     "Backup failed for site: %s (Blog ID: %d)\n\nError: %s\n\nFile: %s\nSize: %s bytes\nDuration: %ss\n\nLogged at: %s",
@@ -190,6 +188,20 @@ function msb_run_backups() {
             'message'    => 'Uploaded to B2.',
         ] );
 
+        if ( $settings['email'] && $settings['notify_success'] ) {
+            $subject = sprintf( '[%s] Backup Succeeded: Site %s (ID: %d)', get_network()->site_name, $slug, $blog_id );
+            $message = sprintf(
+                "Backup completed successfully for site: %s (Blog ID: %d)\n\nFile: %s\nSize: %s\nDuration: %ss\n\nLogged at: %s",
+                $slug,
+                $blog_id,
+                $file_name,
+                size_format( $file_size ),
+                $duration,
+                current_time( 'mysql' )
+            );
+            wp_mail( $settings['email'], $subject, $message );
+        }
+
         $uploader->prune_old_backups( $slug, 14 );
     }
 }
@@ -197,13 +209,15 @@ function msb_run_backups() {
 // ─── Settings ─────────────────────────────────────────────────────────────────
 function msb_get_settings(): array {
     return [
-        'endpoint'        => get_site_option( 'msb_b2_endpoint', '' ),
-        'bucket'          => get_site_option( 'msb_b2_bucket',   '' ),
-        'key_id'          => get_site_option( 'msb_b2_key_id',   '' ),
-        'app_key'         => get_site_option( 'msb_b2_app_key',  '' ),
-        'prefix'          => get_site_option( 'msb_b2_prefix',   'per-site-backups/' ),
-        'email'           => get_site_option( 'msb_notification_email', '' ),
-        'frequency_hours' => max( 1, (int) get_site_option( 'msb_backup_frequency_hours', 24 ) ),
+        'endpoint'         => get_site_option( 'msb_b2_endpoint', '' ),
+        'bucket'           => get_site_option( 'msb_b2_bucket',   '' ),
+        'key_id'           => get_site_option( 'msb_b2_key_id',   '' ),
+        'app_key'          => get_site_option( 'msb_b2_app_key',  '' ),
+        'prefix'           => get_site_option( 'msb_b2_prefix',   'per-site-backups/' ),
+        'email'            => get_site_option( 'msb_notification_email', '' ),
+        'frequency_hours'  => max( 1, (int) get_site_option( 'msb_backup_frequency_hours', 24 ) ),
+        'notify_success'   => (bool) get_site_option( 'msb_notify_on_success', false ),
+        'notify_failure'   => (bool) get_site_option( 'msb_notify_on_failure', true ),
     ];
 }
 
@@ -222,6 +236,9 @@ function msb_save_settings() {
             update_site_option( $field, sanitize_text_field( wp_unslash( $_POST[ $field ] ?? '' ) ) );
         }
     }
+
+    update_site_option( 'msb_notify_on_success', isset( $_POST['msb_notify_on_success'] ) ? 1 : 0 );
+    update_site_option( 'msb_notify_on_failure', isset( $_POST['msb_notify_on_failure'] ) ? 1 : 0 );
 
     $new_frequency = max( 1, (int) ( $_POST['msb_backup_frequency_hours'] ?? 24 ) );
     $old_frequency = max( 1, (int) get_site_option( 'msb_backup_frequency_hours', 24 ) );
@@ -326,6 +343,28 @@ function msb_render_settings_page() {
                     </td>
                 </tr>
                 <?php endforeach; ?>
+                <tr>
+                    <th>Email Notifications</th>
+                    <td>
+                        <label>
+                            <input type="checkbox"
+                                   id="msb_notify_on_failure"
+                                   name="msb_notify_on_failure"
+                                   value="1"
+                                   <?php checked( $settings['notify_failure'] ); ?>>
+                            Notify on failed backups
+                        </label>
+                        <br>
+                        <label>
+                            <input type="checkbox"
+                                   id="msb_notify_on_success"
+                                   name="msb_notify_on_success"
+                                   value="1"
+                                   <?php checked( $settings['notify_success'] ); ?>>
+                            Notify on successful backups
+                        </label>
+                    </td>
+                </tr>
                 <tr>
                     <th><label for="msb_backup_frequency_hours">Backup Frequency (hours)</label></th>
                     <td>
