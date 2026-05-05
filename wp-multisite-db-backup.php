@@ -27,3 +27,6 @@ define( 'MSB_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
 
 // Load the main plugin functionality
 require_once MSB_PLUGIN_DIR . 'wp-multisite-db-backup/multi-site-content-backup.php';
+
+register_activation_hook( __FILE__, 'msb_activate' );
+register_deactivation_hook( __FILE__, 'msb_deactivate' );
