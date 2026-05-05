@@ -43,13 +43,33 @@ function msb_add_cron_interval( array $schedules ): array {
     return $schedules;
 }
 
+/**
+ * Returns the Unix timestamp of the next scheduled run, honouring the
+ * site timezone and the configured start time.  If the start time has
+ * already passed today the next occurrence is pushed forward by one interval.
+ */
+function msb_next_run_timestamp( int $frequency_hours, string $start_time ): int {
+    $tz    = wp_timezone();
+    $now   = new DateTimeImmutable( 'now', $tz );
+    $parts = explode( ':', $start_time );
+    $hour  = max( 0, min( 23, (int) ( $parts[0] ?? 2 ) ) );
+    $min   = max( 0, min( 59, (int) ( $parts[1] ?? 0 ) ) );
+    $next  = $now->setTime( $hour, $min, 0 );
+    if ( $next <= $now ) {
+        $next = $next->modify( "+{$frequency_hours} hours" );
+    }
+    return $next->getTimestamp();
+}
+
 function msb_schedule_cron() {
     // Replace any existing event that isn't using our custom interval (e.g. old 'daily' schedule).
     if ( wp_next_scheduled( MSB_CRON_HOOK ) && wp_get_schedule( MSB_CRON_HOOK ) !== 'msb_custom_interval' ) {
         wp_clear_scheduled_hook( MSB_CRON_HOOK );
     }
     if ( ! wp_next_scheduled( MSB_CRON_HOOK ) ) {
-        wp_schedule_event( time() + HOUR_IN_SECONDS, 'msb_custom_interval', MSB_CRON_HOOK );
+        $hours      = max( 1, (int) get_site_option( 'msb_backup_frequency_hours', 24 ) );
+        $start_time = get_site_option( 'msb_backup_start_time', '02:00' );
+        wp_schedule_event( msb_next_run_timestamp( $hours, $start_time ), 'msb_custom_interval', MSB_CRON_HOOK );
     }
 }
 
@@ -216,6 +236,7 @@ function msb_get_settings(): array {
         'prefix'           => get_site_option( 'msb_b2_prefix',   'per-site-backups/' ),
         'email'            => get_site_option( 'msb_notification_email', '' ),
         'frequency_hours'  => max( 1, (int) get_site_option( 'msb_backup_frequency_hours', 24 ) ),
+        'start_time'       => get_site_option( 'msb_backup_start_time', '02:00' ),
         'notify_success'   => (bool) get_site_option( 'msb_notify_on_success', false ),
         'notify_failure'   => (bool) get_site_option( 'msb_notify_on_failure', true ),
     ];
@@ -240,13 +261,20 @@ function msb_save_settings() {
     update_site_option( 'msb_notify_on_success', isset( $_POST['msb_notify_on_success'] ) ? 1 : 0 );
     update_site_option( 'msb_notify_on_failure', isset( $_POST['msb_notify_on_failure'] ) ? 1 : 0 );
 
-    $new_frequency = max( 1, (int) ( $_POST['msb_backup_frequency_hours'] ?? 24 ) );
-    $old_frequency = max( 1, (int) get_site_option( 'msb_backup_frequency_hours', 24 ) );
+    $new_frequency  = max( 1, (int) ( $_POST['msb_backup_frequency_hours'] ?? 24 ) );
+    $old_frequency  = max( 1, (int) get_site_option( 'msb_backup_frequency_hours', 24 ) );
+    $new_start_time = sanitize_text_field( wp_unslash( $_POST['msb_backup_start_time'] ?? '02:00' ) );
+    // Validate HH:MM format; fall back to stored value if invalid.
+    if ( ! preg_match( '/^\d{2}:\d{2}$/', $new_start_time ) ) {
+        $new_start_time = get_site_option( 'msb_backup_start_time', '02:00' );
+    }
+    $old_start_time = get_site_option( 'msb_backup_start_time', '02:00' );
     update_site_option( 'msb_backup_frequency_hours', $new_frequency );
+    update_site_option( 'msb_backup_start_time', $new_start_time );
 
-    if ( $new_frequency !== $old_frequency || wp_get_schedule( MSB_CRON_HOOK ) !== 'msb_custom_interval' ) {
+    if ( $new_frequency !== $old_frequency || $new_start_time !== $old_start_time || wp_get_schedule( MSB_CRON_HOOK ) !== 'msb_custom_interval' ) {
         wp_clear_scheduled_hook( MSB_CRON_HOOK );
-        wp_schedule_event( time() + $new_frequency * HOUR_IN_SECONDS, 'msb_custom_interval', MSB_CRON_HOOK );
+        wp_schedule_event( msb_next_run_timestamp( $new_frequency, $new_start_time ), 'msb_custom_interval', MSB_CRON_HOOK );
     }
 
     wp_redirect( add_query_arg( [ 'page' => 'msb-site-backups', 'updated' => '1' ], network_admin_url( 'admin.php' ) ) );
@@ -385,6 +413,19 @@ function msb_render_settings_page() {
                                step="1"
                                class="small-text">
                         <p class="description">How often to run automatic backups. E.g. enter <strong>24</strong> for daily, <strong>12</strong> for twice a day.</p>
+                    </td>
+                </tr>
+                <tr>
+                    <th><label for="msb_backup_start_time">Backup Start Time</label></th>
+                    <td>
+                        <input type="time"
+                               id="msb_backup_start_time"
+                               name="msb_backup_start_time"
+                               value="<?php echo esc_attr( $settings['start_time'] ); ?>">
+                        <p class="description">
+                            Time of day to run the first backup (uses the site timezone: <strong><?php echo esc_html( wp_timezone_string() ); ?></strong>).
+                            Subsequent runs follow the frequency interval above.
+                        </p>
                     </td>
                 </tr>
             </table>
