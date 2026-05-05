@@ -24,6 +24,7 @@ require_once MSB_DIR . 'class-b2-uploader.php';
 add_action( 'init', 'msb_maybe_create_log_table' );
 add_action( MSB_CRON_HOOK, 'msb_run_backups' );
 add_action( 'init', 'msb_schedule_cron' );
+add_action( 'init', 'msb_cleanup_stale_cron' );
 add_filter( 'cron_schedules', 'msb_add_cron_interval' );
 
 // Network settings page.
@@ -62,6 +63,13 @@ function msb_next_run_timestamp( int $frequency_hours, string $start_time ): int
 }
 
 function msb_schedule_cron() {
+    // On multisite, wp_next_scheduled/wp_schedule_event operate on the CURRENT
+    // blog's options. Registering on every subsite would create independent cron
+    // events that each trigger a full-network backup. Only schedule on main site.
+    if ( ! is_main_site() ) {
+        return;
+    }
+
     // Replace any existing event that isn't using our custom interval (e.g. old 'daily' schedule).
     if ( wp_next_scheduled( MSB_CRON_HOOK ) && wp_get_schedule( MSB_CRON_HOOK ) !== 'msb_custom_interval' ) {
         wp_clear_scheduled_hook( MSB_CRON_HOOK );
@@ -71,6 +79,46 @@ function msb_schedule_cron() {
         $start_time = get_site_option( 'msb_backup_start_time', '02:00' );
         wp_schedule_event( msb_next_run_timestamp( $hours, $start_time ), 'msb_custom_interval', MSB_CRON_HOOK );
     }
+}
+
+// One-time migration: clear stale cron events that were incorrectly registered
+// on every subsite. Runs once (guarded by a network option) and self-clears.
+function msb_cleanup_stale_cron() {
+    if ( get_site_option( 'msb_cron_cleaned_v2' ) ) {
+        return;
+    }
+    $main_id = get_main_site_id();
+    foreach ( get_sites( [ 'number' => 500, 'fields' => 'ids' ] ) as $blog_id ) {
+        $blog_id = (int) $blog_id;
+        if ( $blog_id === $main_id ) {
+            continue;
+        }
+        switch_to_blog( $blog_id );
+        wp_clear_scheduled_hook( MSB_CRON_HOOK );
+        restore_current_blog();
+    }
+    update_site_option( 'msb_cron_cleaned_v2', true );
+}
+
+function msb_activate() {
+    $main_id    = get_main_site_id();
+    $hours      = max( 1, (int) get_site_option( 'msb_backup_frequency_hours', 24 ) );
+    $start_time = get_site_option( 'msb_backup_start_time', '02:00' );
+    switch_to_blog( $main_id );
+    if ( ! wp_next_scheduled( MSB_CRON_HOOK ) ) {
+        wp_schedule_event( msb_next_run_timestamp( $hours, $start_time ), 'msb_custom_interval', MSB_CRON_HOOK );
+    }
+    restore_current_blog();
+}
+
+function msb_deactivate() {
+    // Clear cron from every site so no stale events linger after deactivation.
+    foreach ( get_sites( [ 'number' => 500, 'fields' => 'ids' ] ) as $blog_id ) {
+        switch_to_blog( (int) $blog_id );
+        wp_clear_scheduled_hook( MSB_CRON_HOOK );
+        restore_current_blog();
+    }
+    delete_site_option( 'msb_cron_cleaned_v2' );
 }
 
 // ─── Log Table ────────────────────────────────────────────────────────────────
