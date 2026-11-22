@@ -90,7 +90,7 @@ class MSB_DB_Exporter {
         $admin_email = get_site_option( 'admin_email' );
         wp_mail(
             $admin_email,
-            '[Multi-Site Content Backup] Critical: Cannot write temp files',
+            '[Multisite DB Backups] Critical: Cannot write temp files',
             "Neither /tmp/msb-backups nor the uploads fallback directory is writable. Backup aborted."
         );
 
@@ -158,7 +158,7 @@ class MSB_DB_Exporter {
     private function export_via_php( array $tables, string $out_path ): array|WP_Error {
         global $wpdb;
 
-        $sql  = "-- Multi-Site Content Backup | Blog ID {$this->blog_id} | Generated: " . current_time( 'mysql' ) . "\n";
+        $sql  = "-- Multisite DB Backups | Blog ID {$this->blog_id} | Generated: " . current_time( 'mysql' ) . "\n";
         $sql .= "SET NAMES utf8mb4;\nSET FOREIGN_KEY_CHECKS=0;\n\n";
 
         foreach ( $tables as $table ) {

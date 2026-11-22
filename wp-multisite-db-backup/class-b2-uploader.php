@@ -2,10 +2,10 @@
 /**
  * MSB_B2_Uploader
  *
- * Uploads backup files to Backblaze B2 via the S3-compatible API.
- * Uses cURL directly for PUT uploads so binary gzip data is streamed
- * via CURLOPT_INFILE — avoiding null-byte truncation bugs in WordPress's
- * wp_remote_request string-body handling.
+ * Uploads backup files to S3-compatible storage (Backblaze B2 or Cloudflare R2)
+ * via the S3 API. Uses cURL directly for PUT uploads so binary gzip data is
+ * streamed via CURLOPT_INFILE — avoiding null-byte truncation bugs in
+ * WordPress's wp_remote_request string-body handling.
  *
  * Implements AWS Signature Version 4 signing.
  */
@@ -20,6 +20,8 @@ class MSB_B2_Uploader {
     private string $app_key;
     private string $prefix;
     private string $region;
+    private string $provider;
+    private string $provider_label;
 
     public function __construct( array $settings ) {
         $this->endpoint = rtrim( $settings['endpoint'] ?? '', '/' );
@@ -27,12 +29,26 @@ class MSB_B2_Uploader {
         $this->key_id   = $settings['key_id']  ?? '';
         $this->app_key  = $settings['app_key'] ?? '';
         $this->prefix   = $settings['prefix']  ?? 'per-site-backups/';
+        $this->provider = ( $settings['provider'] ?? 'b2' ) === 'r2' ? 'r2' : 'b2';
+        $this->provider_label = $this->provider === 'r2' ? 'Cloudflare R2' : 'Backblaze B2';
+
+        $this->region = $this->detect_region();
+    }
+
+    /**
+     * Resolve the SigV4 region for the active provider/endpoint.
+     */
+    private function detect_region(): string {
+        if ( $this->provider === 'r2' || strpos( $this->endpoint, 'r2.cloudflarestorage.com' ) !== false ) {
+            // Cloudflare R2 requires the region "auto" for SigV4.
+            return 'auto';
+        }
 
         if ( preg_match( '#s3\.([^.]+)\.backblazeb2\.com#', $this->endpoint, $m ) ) {
-            $this->region = $m[1];
-        } else {
-            $this->region = 'us-east-005';
+            return $m[1];
         }
+
+        return 'us-east-005';
     }
 
     // ─── Public: Upload ───────────────────────────────────────────────────────
@@ -44,7 +60,13 @@ class MSB_B2_Uploader {
      */
     public function upload( string $local_path, string $file_name, int $blog_id, string $slug ) {
         if ( ! $this->is_configured() ) {
-            return new WP_Error( 'b2_not_configured', 'B2 settings are incomplete. Please configure them in Network Admin → Settings → Site Backups.' );
+            return new WP_Error(
+                'storage_not_configured',
+                sprintf(
+                    '%s settings are incomplete. Please configure them in Network Admin → Settings → DB Backups.',
+                    $this->provider_label
+                )
+            );
         }
 
         $date_path  = current_time( 'Y/m/d' );
@@ -138,20 +160,27 @@ class MSB_B2_Uploader {
         error_log( '[MSB Debug] ' . $debug );
 
         if ( $curl_error ) {
-            return new WP_Error( 'b2_curl_error', "B2 upload cURL error: {$curl_error}\n\n{$debug}" );
+            return new WP_Error( 'storage_curl_error', "{$this->provider_label} upload cURL error: {$curl_error}\n\n{$debug}" );
         }
 
         if ( $http_code !== 200 ) {
-            return new WP_Error( 'b2_upload_http_error', "B2 upload returned HTTP {$http_code}: {$response_body}\n\n{$debug}" );
+            return new WP_Error( 'storage_upload_http_error', "{$this->provider_label} upload returned HTTP {$http_code}: {$response_body}\n\n{$debug}" );
         }
 
         return true;
     }
 
+    /**
+     * Human-readable name for the active storage provider.
+     */
+    public function get_provider_label(): string {
+        return $this->provider_label;
+    }
+
     // ─── Public: Prune Old Backups ────────────────────────────────────────────
 
     /**
-     * Delete B2 objects for a given site slug older than $keep_days.
+     * Delete stored objects for a given site slug older than $keep_days.
      *
      * @return true|WP_Error
      */
@@ -200,7 +229,7 @@ class MSB_B2_Uploader {
 
         $code = wp_remote_retrieve_response_code( $response );
         if ( $code !== 200 ) {
-            return new WP_Error( 'b2_list_error', 'B2 list failed: HTTP ' . $code . ' ' . wp_remote_retrieve_body( $response ) );
+            return new WP_Error( 'storage_list_error', $this->provider_label . ' list failed: HTTP ' . $code . ' ' . wp_remote_retrieve_body( $response ) );
         }
 
         $xml     = simplexml_load_string( wp_remote_retrieve_body( $response ) );
