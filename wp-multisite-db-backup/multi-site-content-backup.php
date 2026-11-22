@@ -3,14 +3,14 @@
  * Core functionality for WP Multisite DB Backups
  *
  * @package WP_Multisite_DB_Backups
- * @version 1.0.1
+ * @version 1.0.2
  */
 
 defined( 'ABSPATH' ) || exit;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 if ( ! defined( 'MSB_VERSION' ) ) {
-    define( 'MSB_VERSION', '1.0.1' );
+    define( 'MSB_VERSION', '1.0.2' );
 }
 define( 'MSB_DIR', plugin_dir_path( __FILE__ ) );
 define( 'MSB_CRON_HOOK', 'msb_run_backups' );
@@ -34,8 +34,17 @@ add_action( 'network_admin_edit_msb_save_settings', 'msb_save_settings' );
 add_action( 'admin_post_msb_run_now', 'msb_handle_run_now' );
 
 // ─── Cron Registration ────────────────────────────────────────────────────────
+/**
+ * Normalize frequency hours. Empty/invalid values fall back to 24 so a blank
+ * settings field cannot accidentally schedule hourly runs.
+ */
+function msb_normalize_frequency_hours( $hours ): int {
+    $hours = (int) $hours;
+    return $hours >= 1 ? $hours : 24;
+}
+
 function msb_add_cron_interval( array $schedules ): array {
-    $hours = max( 1, (int) get_site_option( 'msb_backup_frequency_hours', 24 ) );
+    $hours = msb_normalize_frequency_hours( get_site_option( 'msb_backup_frequency_hours', 24 ) );
     $schedules['msb_custom_interval'] = [
         'interval' => $hours * HOUR_IN_SECONDS,
         'display'  => sprintf( 'Every %d hour(s)', $hours ),
@@ -44,33 +53,109 @@ function msb_add_cron_interval( array $schedules ): array {
 }
 
 /**
- * Returns the Unix timestamp of the next scheduled run, honouring the
- * site timezone and the configured start time.  If the start time has
- * already passed today the next occurrence is pushed forward by one interval.
+ * Next run timestamp in the future, honouring timezone + start time.
+ * Keeps adding the frequency until the result is actually after now
+ * (avoids scheduling a past timestamp that WP-Cron fires immediately).
  */
 function msb_next_run_timestamp( int $frequency_hours, string $start_time ): int {
+    $frequency_hours = msb_normalize_frequency_hours( $frequency_hours );
     $tz    = wp_timezone();
     $now   = new DateTimeImmutable( 'now', $tz );
     $parts = explode( ':', $start_time );
     $hour  = max( 0, min( 23, (int) ( $parts[0] ?? 2 ) ) );
     $min   = max( 0, min( 59, (int) ( $parts[1] ?? 0 ) ) );
     $next  = $now->setTime( $hour, $min, 0 );
-    if ( $next <= $now ) {
+
+    // Guard against infinite loops if frequency is somehow zero.
+    $safety = 0;
+    while ( $next <= $now && $safety < 1000 ) {
         $next = $next->modify( "+{$frequency_hours} hours" );
+        $safety++;
     }
+
     return $next->getTimestamp();
 }
 
+/**
+ * Inspect all cron entries for our hook (duplicates + stored interval).
+ *
+ * @return array{count:int,interval:?int}
+ */
+function msb_cron_event_meta(): array {
+    $crons = _get_cron_array();
+    $count = 0;
+    $interval = null;
+
+    if ( is_array( $crons ) ) {
+        foreach ( $crons as $hooks ) {
+            if ( empty( $hooks[ MSB_CRON_HOOK ] ) || ! is_array( $hooks[ MSB_CRON_HOOK ] ) ) {
+                continue;
+            }
+            foreach ( $hooks[ MSB_CRON_HOOK ] as $event ) {
+                $count++;
+                if ( isset( $event['interval'] ) ) {
+                    $interval = (int) $event['interval'];
+                }
+            }
+        }
+    }
+
+    return [
+        'count'    => $count,
+        'interval' => $interval,
+    ];
+}
+
+/**
+ * Clear any existing events and schedule exactly one with the current settings.
+ */
+function msb_reschedule_cron( ?int $frequency_hours = null, ?string $start_time = null ): void {
+    wp_clear_scheduled_hook( MSB_CRON_HOOK );
+
+    $hours = msb_normalize_frequency_hours(
+        $frequency_hours ?? get_site_option( 'msb_backup_frequency_hours', 24 )
+    );
+    $start = $start_time ?? get_site_option( 'msb_backup_start_time', '02:00' );
+    if ( ! is_string( $start ) || ! preg_match( '/^\d{2}:\d{2}$/', $start ) ) {
+        $start = '02:00';
+    }
+
+    wp_schedule_event(
+        msb_next_run_timestamp( $hours, $start ),
+        'msb_custom_interval',
+        MSB_CRON_HOOK
+    );
+}
+
+/**
+ * Ensure a single cron event exists with the correct interval.
+ * Fixes duplicates and stale intervals left over from earlier settings.
+ */
 function msb_schedule_cron() {
-    // Replace any existing event that isn't using our custom interval (e.g. old 'daily' schedule).
-    if ( wp_next_scheduled( MSB_CRON_HOOK ) && wp_get_schedule( MSB_CRON_HOOK ) !== 'msb_custom_interval' ) {
-        wp_clear_scheduled_hook( MSB_CRON_HOOK );
+    $hours             = msb_normalize_frequency_hours( get_site_option( 'msb_backup_frequency_hours', 24 ) );
+    $expected_interval = $hours * HOUR_IN_SECONDS;
+    $meta              = msb_cron_event_meta();
+    $schedule_name     = wp_get_schedule( MSB_CRON_HOOK );
+
+    $needs_reschedule = (
+        $meta['count'] !== 1
+        || $schedule_name !== 'msb_custom_interval'
+        || (int) $meta['interval'] !== $expected_interval
+    );
+
+    if ( $needs_reschedule ) {
+        msb_reschedule_cron( $hours );
     }
-    if ( ! wp_next_scheduled( MSB_CRON_HOOK ) ) {
-        $hours      = max( 1, (int) get_site_option( 'msb_backup_frequency_hours', 24 ) );
-        $start_time = get_site_option( 'msb_backup_start_time', '02:00' );
-        wp_schedule_event( msb_next_run_timestamp( $hours, $start_time ), 'msb_custom_interval', MSB_CRON_HOOK );
-    }
+}
+
+function msb_activate_plugin() {
+    msb_maybe_create_log_table();
+    msb_reschedule_cron();
+}
+
+function msb_deactivate_plugin() {
+    wp_clear_scheduled_hook( MSB_CRON_HOOK );
+    delete_site_transient( 'msb_backup_running' );
 }
 
 // ─── Log Table ────────────────────────────────────────────────────────────────
@@ -124,66 +209,126 @@ function msb_log( array $entry ) {
 }
 
 // ─── Main Backup Runner ───────────────────────────────────────────────────────
-function msb_run_backups() {
+/**
+ * @param bool $force When true (manual "Run Now"), skip the recent-run cooldown.
+ */
+function msb_run_backups( bool $force = false ) {
+    // Prevent overlapping runs (cron + manual, or duplicate cron events).
+    if ( get_site_transient( 'msb_backup_running' ) ) {
+        return;
+    }
+
+    $frequency_hours = msb_normalize_frequency_hours( get_site_option( 'msb_backup_frequency_hours', 24 ) );
+
+    // Scheduled runs: skip if a full run completed too recently (stops WP-Cron
+    // catch-up / duplicate events from producing multiple backups per day).
+    if ( ! $force ) {
+        $last    = (int) get_site_option( 'msb_last_backup_run', 0 );
+        $min_gap = (int) ( $frequency_hours * HOUR_IN_SECONDS * 0.75 );
+        if ( $last > 0 && ( time() - $last ) < $min_gap ) {
+            return;
+        }
+    }
+
+    set_site_transient( 'msb_backup_running', 1, 30 * MINUTE_IN_SECONDS );
+
     $sites    = get_sites( [ 'number' => 500, 'fields' => 'ids' ] );
     $settings = msb_get_settings();
     $uploader = new MSB_B2_Uploader( $settings );
 
-    foreach ( $sites as $blog_id ) {
-        $blog_id = (int) $blog_id;
-        $details = get_blog_details( $blog_id );
-        $slug    = $details ? sanitize_title( $details->blogname ) : 'site' . $blog_id;
+    try {
+        foreach ( $sites as $blog_id ) {
+            $blog_id = (int) $blog_id;
+            $details = get_blog_details( $blog_id );
+            $slug    = $details ? sanitize_title( $details->blogname ) : 'site' . $blog_id;
 
-        $start    = microtime( true );
-        $exporter = new MSB_DB_Exporter( $blog_id, $slug );
-        $export   = $exporter->export();
+            $start    = microtime( true );
+            $exporter = new MSB_DB_Exporter( $blog_id, $slug );
+            $export   = $exporter->export();
 
-        if ( is_wp_error( $export ) ) {
-            msb_log( [
-                'blog_id'   => $blog_id,
-                'site_slug' => $slug,
-                'status'    => 'failed',
-                'message'   => $export->get_error_message(),
-            ] );
-            if ( $settings['email'] && $settings['notify_failure'] ) {
-                $subject = sprintf( '[%s] Backup Export Failed: Site %s (ID: %d)', get_network()->site_name, $slug, $blog_id );
-                $message = sprintf(
-                    "Database export failed for site: %s (Blog ID: %d)\n\nError: %s\n\nLogged at: %s",
-                    $slug,
-                    $blog_id,
-                    $export->get_error_message(),
-                    current_time( 'mysql' )
-                );
-                wp_mail( $settings['email'], $subject, $message );
+            if ( is_wp_error( $export ) ) {
+                msb_log( [
+                    'blog_id'   => $blog_id,
+                    'site_slug' => $slug,
+                    'status'    => 'failed',
+                    'message'   => $export->get_error_message(),
+                ] );
+                if ( $settings['email'] && $settings['notify_failure'] ) {
+                    $subject = sprintf( '[%s] Backup Export Failed: Site %s (ID: %d)', get_network()->site_name, $slug, $blog_id );
+                    $message = sprintf(
+                        "Database export failed for site: %s (Blog ID: %d)\n\nError: %s\n\nLogged at: %s",
+                        $slug,
+                        $blog_id,
+                        $export->get_error_message(),
+                        current_time( 'mysql' )
+                    );
+                    wp_mail( $settings['email'], $subject, $message );
+                }
+                continue;
             }
-            continue;
-        }
 
-        $file_path = $export['path'];
-        $file_name = $export['name'];
-        $file_size = filesize( $file_path );
+            $file_path = $export['path'];
+            $file_name = $export['name'];
+            $file_size = filesize( $file_path );
 
-        $upload = $uploader->upload( $file_path, $file_name, $blog_id, $slug );
+            $upload = $uploader->upload( $file_path, $file_name, $blog_id, $slug );
 
-        $duration = round( microtime( true ) - $start, 2 );
+            $duration = round( microtime( true ) - $start, 2 );
 
-        if ( is_wp_error( $upload ) ) {
+            if ( is_wp_error( $upload ) ) {
+                msb_log( [
+                    'blog_id'    => $blog_id,
+                    'site_slug'  => $slug,
+                    'status'     => 'failed',
+                    'file_name'  => $file_name,
+                    'file_size'  => $file_size,
+                    'duration_s' => $duration,
+                    'message'    => $upload->get_error_message(),
+                ] );
+                if ( $settings['email'] && $settings['notify_failure'] ) {
+                    $subject = sprintf( '[%s] Backup Failed: Site %s (ID: %d)', get_network()->site_name, $slug, $blog_id );
+                    $message = sprintf(
+                        "Backup failed for site: %s (Blog ID: %d)\n\nError: %s\n\nFile: %s\nSize: %s bytes\nDuration: %ss\n\nLogged at: %s",
+                        $slug,
+                        $blog_id,
+                        $upload->get_error_message(),
+                        $file_name,
+                        size_format( $file_size ),
+                        $duration,
+                        current_time( 'mysql' )
+                    );
+                    wp_mail( $settings['email'], $subject, $message );
+                }
+
+                // Retain local file for retry — do not delete.
+                continue;
+            }
+
+            @unlink( $file_path );
+
+            $destination = sprintf(
+                '%s (%s)',
+                $uploader->get_provider_label(),
+                $settings['bucket'] !== '' ? $settings['bucket'] : 'no bucket'
+            );
+
             msb_log( [
                 'blog_id'    => $blog_id,
                 'site_slug'  => $slug,
-                'status'     => 'failed',
+                'status'     => 'success',
                 'file_name'  => $file_name,
                 'file_size'  => $file_size,
                 'duration_s' => $duration,
-                'message'    => $upload->get_error_message(),
+                'message'    => 'Uploaded to ' . $destination . '.',
             ] );
-            if ( $settings['email'] && $settings['notify_failure'] ) {
-                $subject = sprintf( '[%s] Backup Failed: Site %s (ID: %d)', get_network()->site_name, $slug, $blog_id );
+
+            if ( $settings['email'] && $settings['notify_success'] ) {
+                $subject = sprintf( '[%s] Backup Succeeded: Site %s (ID: %d)', get_network()->site_name, $slug, $blog_id );
                 $message = sprintf(
-                    "Backup failed for site: %s (Blog ID: %d)\n\nError: %s\n\nFile: %s\nSize: %s bytes\nDuration: %ss\n\nLogged at: %s",
+                    "Backup completed successfully for site: %s (Blog ID: %d)\n\nDestination: %s\nFile: %s\nSize: %s\nDuration: %ss\n\nLogged at: %s",
                     $slug,
                     $blog_id,
-                    $upload->get_error_message(),
+                    $destination,
                     $file_name,
                     size_format( $file_size ),
                     $duration,
@@ -192,37 +337,11 @@ function msb_run_backups() {
                 wp_mail( $settings['email'], $subject, $message );
             }
 
-            // Retain local file for retry — do not delete.
-            continue;
+            $uploader->prune_old_backups( $slug, 14 );
         }
-
-        @unlink( $file_path );
-
-        msb_log( [
-            'blog_id'    => $blog_id,
-            'site_slug'  => $slug,
-            'status'     => 'success',
-            'file_name'  => $file_name,
-            'file_size'  => $file_size,
-            'duration_s' => $duration,
-            'message'    => 'Uploaded to ' . $uploader->get_provider_label() . '.',
-        ] );
-
-        if ( $settings['email'] && $settings['notify_success'] ) {
-            $subject = sprintf( '[%s] Backup Succeeded: Site %s (ID: %d)', get_network()->site_name, $slug, $blog_id );
-            $message = sprintf(
-                "Backup completed successfully for site: %s (Blog ID: %d)\n\nFile: %s\nSize: %s\nDuration: %ss\n\nLogged at: %s",
-                $slug,
-                $blog_id,
-                $file_name,
-                size_format( $file_size ),
-                $duration,
-                current_time( 'mysql' )
-            );
-            wp_mail( $settings['email'], $subject, $message );
-        }
-
-        $uploader->prune_old_backups( $slug, 14 );
+    } finally {
+        update_site_option( 'msb_last_backup_run', time() );
+        delete_site_transient( 'msb_backup_running' );
     }
 }
 
@@ -253,7 +372,7 @@ function msb_get_all_settings(): array {
             'prefix'   => get_site_option( 'msb_r2_prefix',   'per-site-backups/' ),
         ],
         'email'            => get_site_option( 'msb_notification_email', '' ),
-        'frequency_hours'  => max( 1, (int) get_site_option( 'msb_backup_frequency_hours', 24 ) ),
+        'frequency_hours'  => msb_normalize_frequency_hours( get_site_option( 'msb_backup_frequency_hours', 24 ) ),
         'start_time'       => get_site_option( 'msb_backup_start_time', '02:00' ),
         'notify_success'   => (bool) get_site_option( 'msb_notify_on_success', false ),
         'notify_failure'   => (bool) get_site_option( 'msb_notify_on_failure', true ),
@@ -300,21 +419,17 @@ function msb_save_settings() {
     update_site_option( 'msb_notify_on_success', isset( $_POST['msb_notify_on_success'] ) ? 1 : 0 );
     update_site_option( 'msb_notify_on_failure', isset( $_POST['msb_notify_on_failure'] ) ? 1 : 0 );
 
-    $new_frequency  = max( 1, (int) ( $_POST['msb_backup_frequency_hours'] ?? 24 ) );
-    $old_frequency  = max( 1, (int) get_site_option( 'msb_backup_frequency_hours', 24 ) );
+    $new_frequency  = msb_normalize_frequency_hours( $_POST['msb_backup_frequency_hours'] ?? 24 );
     $new_start_time = sanitize_text_field( wp_unslash( $_POST['msb_backup_start_time'] ?? '02:00' ) );
     // Validate HH:MM format; fall back to stored value if invalid.
     if ( ! preg_match( '/^\d{2}:\d{2}$/', $new_start_time ) ) {
         $new_start_time = get_site_option( 'msb_backup_start_time', '02:00' );
     }
-    $old_start_time = get_site_option( 'msb_backup_start_time', '02:00' );
     update_site_option( 'msb_backup_frequency_hours', $new_frequency );
     update_site_option( 'msb_backup_start_time', $new_start_time );
 
-    if ( $new_frequency !== $old_frequency || $new_start_time !== $old_start_time || wp_get_schedule( MSB_CRON_HOOK ) !== 'msb_custom_interval' ) {
-        wp_clear_scheduled_hook( MSB_CRON_HOOK );
-        wp_schedule_event( msb_next_run_timestamp( $new_frequency, $new_start_time ), 'msb_custom_interval', MSB_CRON_HOOK );
-    }
+    // Always clear + reschedule on save so duplicates/stale intervals cannot linger.
+    msb_reschedule_cron( $new_frequency, $new_start_time );
 
     wp_redirect( add_query_arg( [ 'page' => 'msb-site-backups', 'updated' => '1' ], network_admin_url( 'admin.php' ) ) );
     exit;
@@ -328,7 +443,7 @@ function msb_handle_run_now() {
         wp_die( 'Unauthorized.' );
     }
 
-    msb_run_backups();
+    msb_run_backups( true );
 
     wp_redirect( add_query_arg( [ 'page' => 'msb-site-backups', 'ran' => '1' ], network_admin_url( 'admin.php' ) ) );
     exit;
@@ -367,6 +482,8 @@ function msb_render_settings_page() {
 
     $settings = msb_get_all_settings();
     $provider = $settings['provider'];
+    $active   = $settings[ $provider ];
+    $active_label = $provider === 'r2' ? 'Cloudflare R2' : 'Backblaze B2';
     ?>
     <div class="wrap">
         <h1>DB Backup Settings</h1>
@@ -388,8 +505,25 @@ function msb_render_settings_page() {
             <div class="notice notice-success"><p>Settings saved.</p></div>
         <?php endif; ?>
         <?php if ( ! empty( $_GET['ran'] ) ) : ?>
-            <div class="notice notice-success"><p>Backup run completed. Check the log below.</p></div>
+            <div class="notice notice-success"><p>Backup run completed. Check the log below — each success row shows which destination received the file.</p></div>
         <?php endif; ?>
+
+        <div class="notice notice-info" style="max-width: 800px;">
+            <p>
+                <strong>Active destination:</strong>
+                <?php echo esc_html( $active_label ); ?>
+                <?php if ( $active['bucket'] !== '' ) : ?>
+                    — bucket <code><?php echo esc_html( $active['bucket'] ); ?></code>
+                <?php endif; ?>
+                <?php if ( $active['endpoint'] !== '' ) : ?>
+                    at <code><?php echo esc_html( $active['endpoint'] ); ?></code>
+                <?php endif; ?>
+            </p>
+            <p class="description" style="margin: 0;">
+                Only this destination is used for manual and scheduled uploads. The other provider’s
+                credentials are stored for convenience but are not written to unless selected.
+            </p>
+        </div>
 
         <h2>Storage Destination</h2>
         <form method="post" action="<?php echo esc_url( network_admin_url( 'edit.php?action=msb_save_settings' ) ); ?>">
@@ -416,7 +550,7 @@ function msb_render_settings_page() {
                                 Cloudflare R2
                             </label>
                         </fieldset>
-                        <p class="description">Credentials for both providers are saved. Only the selected destination is used for uploads.</p>
+                        <p class="description">Choose one destination. Credentials for both can be saved, but each backup run uploads to the selected provider only.</p>
                     </td>
                 </tr>
             </table>
@@ -547,6 +681,28 @@ function msb_render_settings_page() {
                         </p>
                     </td>
                 </tr>
+                <tr>
+                    <th>Next Scheduled Run</th>
+                    <td>
+                        <?php
+                        $next_ts   = wp_next_scheduled( MSB_CRON_HOOK );
+                        $cron_meta = msb_cron_event_meta();
+                        if ( $next_ts ) {
+                            echo esc_html(
+                                wp_date( 'Y-m-d H:i:s T', $next_ts )
+                            );
+                            echo ' <span class="description">(' . esc_html(
+                                sprintf( 'every %d hour(s)', $settings['frequency_hours'] )
+                            ) . ')</span>';
+                        } else {
+                            echo '<em>Not scheduled</em>';
+                        }
+                        if ( $cron_meta['count'] > 1 ) {
+                            echo '<p class="description" style="color:#d63638;">Warning: ' . esc_html( (string) $cron_meta['count'] ) . ' cron events found for this hook. Saving settings will collapse them to one.</p>';
+                        }
+                        ?>
+                    </td>
+                </tr>
             </table>
             <?php submit_button( 'Save Settings' ); ?>
         </form>
@@ -568,6 +724,13 @@ function msb_render_settings_page() {
         </script>
 
         <h2>Run Backup Now</h2>
+        <p class="description">
+            This will upload to <strong><?php echo esc_html( $active_label ); ?></strong>
+            <?php if ( $active['bucket'] !== '' ) : ?>
+                (<code><?php echo esc_html( $active['bucket'] ); ?></code>)
+            <?php endif; ?>
+            only. Save settings first if you just changed the provider.
+        </p>
         <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
             <?php wp_nonce_field( 'msb_run_now' ); ?>
             <input type="hidden" name="action" value="msb_run_now">
