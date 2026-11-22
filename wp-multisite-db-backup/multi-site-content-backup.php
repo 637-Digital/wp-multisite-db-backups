@@ -205,7 +205,7 @@ function msb_run_backups() {
             'file_name'  => $file_name,
             'file_size'  => $file_size,
             'duration_s' => $duration,
-            'message'    => 'Uploaded to B2.',
+            'message'    => 'Uploaded to ' . $uploader->get_provider_label() . '.',
         ] );
 
         if ( $settings['email'] && $settings['notify_success'] ) {
@@ -227,19 +227,55 @@ function msb_run_backups() {
 }
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
-function msb_get_settings(): array {
+function msb_get_provider(): string {
+    $provider = get_site_option( 'msb_storage_provider', 'b2' );
+    return $provider === 'r2' ? 'r2' : 'b2';
+}
+
+/**
+ * Full settings for the admin UI (both providers + schedule/notifications).
+ */
+function msb_get_all_settings(): array {
     return [
-        'endpoint'         => get_site_option( 'msb_b2_endpoint', '' ),
-        'bucket'           => get_site_option( 'msb_b2_bucket',   '' ),
-        'key_id'           => get_site_option( 'msb_b2_key_id',   '' ),
-        'app_key'          => get_site_option( 'msb_b2_app_key',  '' ),
-        'prefix'           => get_site_option( 'msb_b2_prefix',   'per-site-backups/' ),
+        'provider'         => msb_get_provider(),
+        'b2'               => [
+            'endpoint' => get_site_option( 'msb_b2_endpoint', '' ),
+            'bucket'   => get_site_option( 'msb_b2_bucket',   '' ),
+            'key_id'   => get_site_option( 'msb_b2_key_id',   '' ),
+            'app_key'  => get_site_option( 'msb_b2_app_key',  '' ),
+            'prefix'   => get_site_option( 'msb_b2_prefix',   'per-site-backups/' ),
+        ],
+        'r2'               => [
+            'endpoint' => get_site_option( 'msb_r2_endpoint', '' ),
+            'bucket'   => get_site_option( 'msb_r2_bucket',   '' ),
+            'key_id'   => get_site_option( 'msb_r2_key_id',   '' ),
+            'app_key'  => get_site_option( 'msb_r2_app_key',  '' ),
+            'prefix'   => get_site_option( 'msb_r2_prefix',   'per-site-backups/' ),
+        ],
         'email'            => get_site_option( 'msb_notification_email', '' ),
         'frequency_hours'  => max( 1, (int) get_site_option( 'msb_backup_frequency_hours', 24 ) ),
         'start_time'       => get_site_option( 'msb_backup_start_time', '02:00' ),
         'notify_success'   => (bool) get_site_option( 'msb_notify_on_success', false ),
         'notify_failure'   => (bool) get_site_option( 'msb_notify_on_failure', true ),
     ];
+}
+
+/**
+ * Active storage credentials for the uploader (selected provider only).
+ */
+function msb_get_settings(): array {
+    $all      = msb_get_all_settings();
+    $provider = $all['provider'];
+    $creds    = $all[ $provider ];
+
+    return array_merge( $creds, [
+        'provider'         => $provider,
+        'email'            => $all['email'],
+        'frequency_hours'  => $all['frequency_hours'],
+        'start_time'       => $all['start_time'],
+        'notify_success'   => $all['notify_success'],
+        'notify_failure'   => $all['notify_failure'],
+    ] );
 }
 
 function msb_save_settings() {
@@ -249,15 +285,18 @@ function msb_save_settings() {
         wp_die( 'Unauthorized.' );
     }
 
-    $fields = [ 'msb_b2_endpoint', 'msb_b2_bucket', 'msb_b2_key_id', 'msb_b2_app_key', 'msb_b2_prefix', 'msb_notification_email' ];
-    foreach ( $fields as $field ) {
-        if ( $field === 'msb_notification_email' ) {
-            update_site_option( $field, sanitize_email( wp_unslash( $_POST[ $field ] ?? '' ) ) );
-        } else {
-            update_site_option( $field, sanitize_text_field( wp_unslash( $_POST[ $field ] ?? '' ) ) );
-        }
+    $provider = ( $_POST['msb_storage_provider'] ?? 'b2' ) === 'r2' ? 'r2' : 'b2';
+    update_site_option( 'msb_storage_provider', $provider );
+
+    $storage_fields = [
+        'msb_b2_endpoint', 'msb_b2_bucket', 'msb_b2_key_id', 'msb_b2_app_key', 'msb_b2_prefix',
+        'msb_r2_endpoint', 'msb_r2_bucket', 'msb_r2_key_id', 'msb_r2_app_key', 'msb_r2_prefix',
+    ];
+    foreach ( $storage_fields as $field ) {
+        update_site_option( $field, sanitize_text_field( wp_unslash( $_POST[ $field ] ?? '' ) ) );
     }
 
+    update_site_option( 'msb_notification_email', sanitize_email( wp_unslash( $_POST['msb_notification_email'] ?? '' ) ) );
     update_site_option( 'msb_notify_on_success', isset( $_POST['msb_notify_on_success'] ) ? 1 : 0 );
     update_site_option( 'msb_notify_on_failure', isset( $_POST['msb_notify_on_failure'] ) ? 1 : 0 );
 
@@ -302,8 +341,8 @@ function msb_register_settings_page() {
     // Using add_menu_page produces a reliable admin.php?page= URL, then we
     // immediately inject it into the Settings submenu and remove the top-level entry.
     add_menu_page(
-        'Site Backups',
-        'Site Backups',
+        'DB Backup Settings',
+        'DB Backups',
         'manage_network_options',
         'msb-site-backups',
         'msb_render_settings_page'
@@ -312,8 +351,8 @@ function msb_register_settings_page() {
     // Move into Settings submenu so it appears in the right place in the nav.
     add_submenu_page(
         'settings.php',
-        'Site Backups',
-        'Site Backups',
+        'DB Backup Settings',
+        'DB Backups',
         'manage_network_options',
         'msb-site-backups',
         'msb_render_settings_page'
@@ -326,18 +365,23 @@ function msb_register_settings_page() {
 function msb_render_settings_page() {
     global $wpdb;
 
-    $settings = msb_get_settings();
+    $settings = msb_get_all_settings();
+    $provider = $settings['provider'];
     ?>
     <div class="wrap">
-        <h1>Multisite Content Backup</h1>
+        <h1>DB Backup Settings</h1>
 
         <p class="description" style="max-width: 800px; margin: 8px 0 16px;">
-            Automatically backs up the database of every site in this network to
+            Automatically backs up the database of every site in this network to cloud storage
+            (
             <a href="https://www.backblaze.com/cloud-storage" target="_blank" rel="noopener">Backblaze B2</a>
+            or
+            <a href="https://developers.cloudflare.com/r2/" target="_blank" rel="noopener">Cloudflare R2</a>
+            )
             on a configurable schedule. Each site's database is exported, compressed, and uploaded
-            as a separate <code>.sql.gz</code> file organised by site slug. Configure your B2
-            credentials below, set how often backups should run, and choose whether to receive
-            email notifications on success or failure.
+            as a separate <code>.sql.gz</code> file organised by site slug. Choose a destination,
+            configure credentials below, set how often backups should run, and choose whether to
+            receive email notifications on success or failure.
         </p>
 
         <?php if ( ! empty( $_GET['updated'] ) ) : ?>
@@ -347,39 +391,114 @@ function msb_render_settings_page() {
             <div class="notice notice-success"><p>Backup run completed. Check the log below.</p></div>
         <?php endif; ?>
 
-        <h2>B2 Connection Settings</h2>
+        <h2>Storage Destination</h2>
         <form method="post" action="<?php echo esc_url( network_admin_url( 'edit.php?action=msb_save_settings' ) ); ?>">
             <?php wp_nonce_field( 'msb_settings' ); ?>
             <table class="form-table">
-                <?php
-                $fields = [
-                    'msb_b2_endpoint'       => [ 'label' => 'B2 Endpoint',       'placeholder' => 'https://s3.us-west-004.backblazeb2.com' ],
-                    'msb_b2_bucket'         => [ 'label' => 'Bucket Name',       'placeholder' => 'my-bucket' ],
-                    'msb_b2_key_id'         => [ 'label' => 'Key ID',            'placeholder' => '' ],
-                    'msb_b2_app_key'        => [ 'label' => 'Application Key',   'placeholder' => '', 'type' => 'password' ],
-                    'msb_b2_prefix'         => [ 'label' => 'Folder Prefix',     'placeholder' => 'per-site-backups/' ],
-                    'msb_notification_email'=> [ 'label' => 'Notification Email', 'placeholder' => 'admin@example.com' ],
-                ];
-                foreach ( $fields as $key => $field ) :
-                    $type        = $field['type'] ?? 'text';
-                    if ( $key === 'msb_notification_email' ) {
-                        $setting_key = 'email';
-                    } else {
-                        $setting_key = str_replace( 'msb_b2_', '', $key );
-                    }
-                ?>
                 <tr>
-                    <th><label for="<?php echo esc_attr( $key ); ?>"><?php echo esc_html( $field['label'] ); ?></label></th>
+                    <th>Provider</th>
                     <td>
-                        <input type="<?php echo esc_attr( $type ); ?>"
-                               id="<?php echo esc_attr( $key ); ?>"
-                               name="<?php echo esc_attr( $key ); ?>"
-                               value="<?php echo esc_attr( $settings[ $setting_key ] ?? '' ); ?>"
-                               placeholder="<?php echo esc_attr( $field['placeholder'] ); ?>"
+                        <fieldset>
+                            <label style="margin-right: 16px;">
+                                <input type="radio"
+                                       name="msb_storage_provider"
+                                       value="b2"
+                                       <?php checked( $provider, 'b2' ); ?>
+                                       class="msb-provider-toggle">
+                                Backblaze B2
+                            </label>
+                            <label>
+                                <input type="radio"
+                                       name="msb_storage_provider"
+                                       value="r2"
+                                       <?php checked( $provider, 'r2' ); ?>
+                                       class="msb-provider-toggle">
+                                Cloudflare R2
+                            </label>
+                        </fieldset>
+                        <p class="description">Credentials for both providers are saved. Only the selected destination is used for uploads.</p>
+                    </td>
+                </tr>
+            </table>
+
+            <div id="msb-provider-b2" class="msb-provider-fields" <?php echo $provider === 'b2' ? '' : 'style="display:none;"'; ?>>
+                <h2>Backblaze B2 Connection</h2>
+                <table class="form-table">
+                    <?php
+                    $b2_fields = [
+                        'msb_b2_endpoint' => [ 'label' => 'B2 Endpoint',     'key' => 'endpoint', 'placeholder' => 'https://s3.us-west-004.backblazeb2.com' ],
+                        'msb_b2_bucket'   => [ 'label' => 'Bucket Name',     'key' => 'bucket',   'placeholder' => 'my-bucket' ],
+                        'msb_b2_key_id'   => [ 'label' => 'Key ID',          'key' => 'key_id',   'placeholder' => '' ],
+                        'msb_b2_app_key'  => [ 'label' => 'Application Key', 'key' => 'app_key',  'placeholder' => '', 'type' => 'password' ],
+                        'msb_b2_prefix'   => [ 'label' => 'Folder Prefix',   'key' => 'prefix',   'placeholder' => 'per-site-backups/' ],
+                    ];
+                    foreach ( $b2_fields as $key => $field ) :
+                        $type = $field['type'] ?? 'text';
+                    ?>
+                    <tr>
+                        <th><label for="<?php echo esc_attr( $key ); ?>"><?php echo esc_html( $field['label'] ); ?></label></th>
+                        <td>
+                            <input type="<?php echo esc_attr( $type ); ?>"
+                                   id="<?php echo esc_attr( $key ); ?>"
+                                   name="<?php echo esc_attr( $key ); ?>"
+                                   value="<?php echo esc_attr( $settings['b2'][ $field['key'] ] ?? '' ); ?>"
+                                   placeholder="<?php echo esc_attr( $field['placeholder'] ); ?>"
+                                   class="regular-text"
+                                   autocomplete="off">
+                        </td>
+                    </tr>
+                    <?php endforeach; ?>
+                </table>
+            </div>
+
+            <div id="msb-provider-r2" class="msb-provider-fields" <?php echo $provider === 'r2' ? '' : 'style="display:none;"'; ?>>
+                <h2>Cloudflare R2 Connection</h2>
+                <table class="form-table">
+                    <?php
+                    $r2_fields = [
+                        'msb_r2_endpoint' => [ 'label' => 'R2 Endpoint',        'key' => 'endpoint', 'placeholder' => 'https://<ACCOUNT_ID>.r2.cloudflarestorage.com' ],
+                        'msb_r2_bucket'   => [ 'label' => 'Bucket Name',        'key' => 'bucket',   'placeholder' => 'my-bucket' ],
+                        'msb_r2_key_id'   => [ 'label' => 'Access Key ID',      'key' => 'key_id',   'placeholder' => '' ],
+                        'msb_r2_app_key'  => [ 'label' => 'Secret Access Key',  'key' => 'app_key',  'placeholder' => '', 'type' => 'password' ],
+                        'msb_r2_prefix'   => [ 'label' => 'Folder Prefix',      'key' => 'prefix',   'placeholder' => 'per-site-backups/' ],
+                    ];
+                    foreach ( $r2_fields as $key => $field ) :
+                        $type = $field['type'] ?? 'text';
+                    ?>
+                    <tr>
+                        <th><label for="<?php echo esc_attr( $key ); ?>"><?php echo esc_html( $field['label'] ); ?></label></th>
+                        <td>
+                            <input type="<?php echo esc_attr( $type ); ?>"
+                                   id="<?php echo esc_attr( $key ); ?>"
+                                   name="<?php echo esc_attr( $key ); ?>"
+                                   value="<?php echo esc_attr( $settings['r2'][ $field['key'] ] ?? '' ); ?>"
+                                   placeholder="<?php echo esc_attr( $field['placeholder'] ); ?>"
+                                   class="regular-text"
+                                   autocomplete="off">
+                        </td>
+                    </tr>
+                    <?php endforeach; ?>
+                </table>
+                <p class="description" style="max-width: 800px;">
+                    Create an R2 API token in the Cloudflare dashboard with Object Read &amp; Write
+                    permissions. Use the S3 API endpoint for your account
+                    (<code>https://&lt;ACCOUNT_ID&gt;.r2.cloudflarestorage.com</code>).
+                </p>
+            </div>
+
+            <h2>Schedule &amp; Notifications</h2>
+            <table class="form-table">
+                <tr>
+                    <th><label for="msb_notification_email">Notification Email</label></th>
+                    <td>
+                        <input type="email"
+                               id="msb_notification_email"
+                               name="msb_notification_email"
+                               value="<?php echo esc_attr( $settings['email'] ); ?>"
+                               placeholder="admin@example.com"
                                class="regular-text">
                     </td>
                 </tr>
-                <?php endforeach; ?>
                 <tr>
                     <th>Email Notifications</th>
                     <td>
@@ -431,6 +550,22 @@ function msb_render_settings_page() {
             </table>
             <?php submit_button( 'Save Settings' ); ?>
         </form>
+        <script>
+        (function () {
+            var toggles = document.querySelectorAll('.msb-provider-toggle');
+            function syncProviderFields() {
+                var selected = 'b2';
+                toggles.forEach(function (el) {
+                    if (el.checked) selected = el.value;
+                });
+                document.getElementById('msb-provider-b2').style.display = selected === 'b2' ? '' : 'none';
+                document.getElementById('msb-provider-r2').style.display = selected === 'r2' ? '' : 'none';
+            }
+            toggles.forEach(function (el) {
+                el.addEventListener('change', syncProviderFields);
+            });
+        })();
+        </script>
 
         <h2>Run Backup Now</h2>
         <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
