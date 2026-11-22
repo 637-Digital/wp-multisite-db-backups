@@ -3,14 +3,14 @@
  * Core functionality for WP Multisite DB Backups
  *
  * @package WP_Multisite_DB_Backups
- * @version 1.0.0
+ * @version 1.0.1
  */
 
 defined( 'ABSPATH' ) || exit;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 if ( ! defined( 'MSB_VERSION' ) ) {
-    define( 'MSB_VERSION', '1.0.0' );
+    define( 'MSB_VERSION', '1.0.1' );
 }
 define( 'MSB_DIR', plugin_dir_path( __FILE__ ) );
 define( 'MSB_CRON_HOOK', 'msb_run_backups' );
