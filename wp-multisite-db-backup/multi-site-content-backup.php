@@ -755,6 +755,21 @@ function msb_render_settings_page() {
                 #msb-log-table { border-collapse: collapse; width: 100%; }
                 #msb-log-table th, #msb-log-table td { padding: 6px 10px; border: 1px solid #ccd0d4; text-align: left; font-size: 13px; }
                 #msb-log-table th { background: #f0f0f1; }
+                #msb-log-table th.msb-sortable {
+                    cursor: pointer;
+                    user-select: none;
+                    white-space: nowrap;
+                }
+                #msb-log-table th.msb-sortable:hover { background: #e2e4e7; }
+                #msb-log-table th.msb-sortable .msb-sort-indicator {
+                    display: inline-block;
+                    margin-left: 4px;
+                    color: #646970;
+                    font-size: 11px;
+                }
+                #msb-log-table th.msb-sorted-asc .msb-sort-indicator::after { content: '▲'; color: #1d2327; }
+                #msb-log-table th.msb-sorted-desc .msb-sort-indicator::after { content: '▼'; color: #1d2327; }
+                #msb-log-table th:not(.msb-sorted-asc):not(.msb-sorted-desc) .msb-sort-indicator::after { content: '⇅'; opacity: 0.45; }
                 .msb-success { color: #00a32a; font-weight: 600; }
                 .msb-failed  { color: #d63638; font-weight: 600; }
                 #msb-filter  { margin-bottom: 8px; padding: 4px 8px; }
@@ -763,38 +778,120 @@ function msb_render_settings_page() {
             <table id="msb-log-table">
                 <thead>
                     <tr>
-                        <th>Date</th>
-                        <th>Blog ID</th>
-                        <th>Site</th>
-                        <th>Status</th>
-                        <th>File</th>
-                        <th>Size</th>
-                        <th>Duration</th>
-                        <th>Message</th>
+                        <th class="msb-sortable msb-sorted-desc" data-sort-type="date" data-col="0">Date <span class="msb-sort-indicator" aria-hidden="true"></span></th>
+                        <th class="msb-sortable" data-sort-type="number" data-col="1">Blog ID <span class="msb-sort-indicator" aria-hidden="true"></span></th>
+                        <th class="msb-sortable" data-sort-type="string" data-col="2">Site <span class="msb-sort-indicator" aria-hidden="true"></span></th>
+                        <th class="msb-sortable" data-sort-type="string" data-col="3">Status <span class="msb-sort-indicator" aria-hidden="true"></span></th>
+                        <th class="msb-sortable" data-sort-type="string" data-col="4">File <span class="msb-sort-indicator" aria-hidden="true"></span></th>
+                        <th class="msb-sortable" data-sort-type="number" data-col="5">Size <span class="msb-sort-indicator" aria-hidden="true"></span></th>
+                        <th class="msb-sortable" data-sort-type="number" data-col="6">Duration <span class="msb-sort-indicator" aria-hidden="true"></span></th>
+                        <th class="msb-sortable" data-sort-type="string" data-col="7">Message <span class="msb-sort-indicator" aria-hidden="true"></span></th>
                     </tr>
                 </thead>
                 <tbody>
                 <?php foreach ( $logs as $row ) : ?>
                     <tr>
-                        <td><?php echo esc_html( $row->run_date ); ?></td>
-                        <td><?php echo esc_html( $row->blog_id ); ?></td>
-                        <td><?php echo esc_html( $row->site_slug ); ?></td>
-                        <td class="msb-<?php echo esc_attr( $row->status ); ?>"><?php echo esc_html( $row->status ); ?></td>
-                        <td><?php echo esc_html( $row->file_name ?? '—' ); ?></td>
-                        <td><?php echo $row->file_size ? esc_html( size_format( $row->file_size ) ) : '—'; ?></td>
-                        <td><?php echo $row->duration_s ? esc_html( $row->duration_s . 's' ) : '—'; ?></td>
-                        <td><?php echo esc_html( $row->message ?? '' ); ?></td>
+                        <td data-sort="<?php echo esc_attr( $row->run_date ); ?>"><?php echo esc_html( $row->run_date ); ?></td>
+                        <td data-sort="<?php echo esc_attr( (string) (int) $row->blog_id ); ?>"><?php echo esc_html( $row->blog_id ); ?></td>
+                        <td data-sort="<?php echo esc_attr( strtolower( (string) $row->site_slug ) ); ?>"><?php echo esc_html( $row->site_slug ); ?></td>
+                        <td class="msb-<?php echo esc_attr( $row->status ); ?>" data-sort="<?php echo esc_attr( $row->status ); ?>"><?php echo esc_html( $row->status ); ?></td>
+                        <td data-sort="<?php echo esc_attr( strtolower( (string) ( $row->file_name ?? '' ) ) ); ?>"><?php echo esc_html( $row->file_name ?? '—' ); ?></td>
+                        <td data-sort="<?php echo esc_attr( (string) (int) ( $row->file_size ?? 0 ) ); ?>"><?php echo $row->file_size ? esc_html( size_format( $row->file_size ) ) : '—'; ?></td>
+                        <td data-sort="<?php echo esc_attr( (string) (float) ( $row->duration_s ?? 0 ) ); ?>"><?php echo $row->duration_s ? esc_html( $row->duration_s . 's' ) : '—'; ?></td>
+                        <td data-sort="<?php echo esc_attr( strtolower( (string) ( $row->message ?? '' ) ) ); ?>"><?php echo esc_html( $row->message ?? '' ); ?></td>
                     </tr>
                 <?php endforeach; ?>
                 </tbody>
             </table>
             <script>
-            document.getElementById('msb-filter').addEventListener('input', function() {
-                var q = this.value.toLowerCase();
-                document.querySelectorAll('#msb-log-table tbody tr').forEach(function(row) {
-                    row.style.display = row.cells[2].textContent.toLowerCase().includes(q) ? '' : 'none';
+            (function () {
+                var table = document.getElementById('msb-log-table');
+                var tbody = table.querySelector('tbody');
+                var headers = table.querySelectorAll('th.msb-sortable');
+                var filterInput = document.getElementById('msb-filter');
+                var sortCol = 0;
+                var sortDir = 'desc';
+
+                function cellSortValue(row, col, type) {
+                    var cell = row.cells[col];
+                    var raw = cell.getAttribute('data-sort');
+                    if (raw === null || raw === '') {
+                        raw = cell.textContent.trim();
+                    }
+                    if (type === 'number') {
+                        var n = parseFloat(raw);
+                        return isNaN(n) ? 0 : n;
+                    }
+                    if (type === 'date') {
+                        // MySQL datetime sorts correctly as a string (YYYY-MM-DD HH:MM:SS).
+                        return raw;
+                    }
+                    return String(raw).toLowerCase();
+                }
+
+                function applyFilter() {
+                    var q = filterInput.value.toLowerCase();
+                    Array.prototype.forEach.call(tbody.rows, function (row) {
+                        var site = row.cells[2].textContent.toLowerCase();
+                        row.style.display = !q || site.indexOf(q) !== -1 ? '' : 'none';
+                    });
+                }
+
+                function sortBy(col, type, dir) {
+                    var rows = Array.prototype.slice.call(tbody.rows);
+                    rows.sort(function (a, b) {
+                        var av = cellSortValue(a, col, type);
+                        var bv = cellSortValue(b, col, type);
+                        var cmp = 0;
+                        if (type === 'number') {
+                            cmp = av - bv;
+                        } else if (av < bv) {
+                            cmp = -1;
+                        } else if (av > bv) {
+                            cmp = 1;
+                        }
+                        return dir === 'asc' ? cmp : -cmp;
+                    });
+                    rows.forEach(function (row) {
+                        tbody.appendChild(row);
+                    });
+                    headers.forEach(function (th) {
+                        th.classList.remove('msb-sorted-asc', 'msb-sorted-desc');
+                    });
+                    var active = table.querySelector('th[data-col="' + col + '"]');
+                    if (active) {
+                        active.classList.add(dir === 'asc' ? 'msb-sorted-asc' : 'msb-sorted-desc');
+                    }
+                    sortCol = col;
+                    sortDir = dir;
+                    applyFilter();
+                }
+
+                headers.forEach(function (th) {
+                    th.setAttribute('role', 'button');
+                    th.setAttribute('tabindex', '0');
+                    th.setAttribute('title', 'Click to sort');
+                    function handleSort() {
+                        var col = parseInt(th.getAttribute('data-col'), 10);
+                        var type = th.getAttribute('data-sort-type') || 'string';
+                        var dir = (col === sortCol && sortDir === 'asc') ? 'desc' : 'asc';
+                        // Date defaults to newest-first on first click if currently unsorted that way.
+                        if (col !== sortCol && type === 'date') {
+                            dir = 'desc';
+                        }
+                        sortBy(col, type, dir);
+                    }
+                    th.addEventListener('click', handleSort);
+                    th.addEventListener('keydown', function (e) {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            handleSort();
+                        }
+                    });
                 });
-            });
+
+                filterInput.addEventListener('input', applyFilter);
+            })();
             </script>
         <?php endif; ?>
 
